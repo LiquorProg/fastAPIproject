@@ -2,7 +2,7 @@ import pandas as pd
 
 from datetime import date
 from datetime import datetime
-from sqlalchemy import func, case, exc
+from sqlalchemy import func, case, exc, and_
 from sqlalchemy.orm import sessionmaker
 from fastapi import FastAPI, HTTPException, File, UploadFile
 from models import engine, Credit, Payment, Dictionary, Plan
@@ -163,44 +163,89 @@ def get_year_performance(year: int):
     except ValueError:
         raise HTTPException(status_code=400, detail="Некоректний рік")
 
-    # Создаем подзапрос для получения суммы з плану по видачам
-    plan_sum_subquery = db.query(func.sum(Plan.sum)).filter(Dictionary.name == "видача")
-
-    # Создаем подзапрос для получения суммы з плану по збору
-    plan_collection_sum_subquery = db.query(func.sum(Plan.sum)).filter(Dictionary.name == "збір")
-
-    # Выполняем SQL-запрос для получения сводной информации
-    results = db.query(
+    table_credits = db.query(
         func.year(Credit.issuance_date).label("year"),
         func.month(Credit.issuance_date).label("month"),
-        func.count(Credit.id_credit).label("num_credits"),
-        plan_sum_subquery.label("plan_sum"),
-        func.sum(Credit.body).label("sum_credits"),
-        (func.sum(Credit.body) / func.sum(Plan.sum) * 100).label("plan_execution_percent"),
-        func.count(Payment.id_payment).label("num_payments"),
-        plan_collection_sum_subquery.label("plan_collection_sum"),
-        func.sum(Payment.sum).label("sum_payments"),
-        (func.sum(Payment.sum) / func.sum(Plan.sum) * 100).label("collection_execution_percent"),
-        (func.sum(Credit.body) / func.sum(Credit.body).over(partition_by=func.year(Credit.issuance_date))).label("sum_credits_percent"),
-        (func.sum(Payment.sum) / func.sum(Payment.sum).over(partition_by=func.year(Payment.payment_date))).label("sum_payments_percent"),
-    ).join(Credit.Payment).filter(func.year(Credit.issuance_date) == year).group_by("month").all()
+        func.count(Credit.id_credit).label("cnt_issuance"),
+        func.sum(Credit.body).label("sum_issuance"),
+            ).group_by("year", "month")
 
-    # Обработка результатов и формирование сводной информации в нужном формате
+    table_plans_issuance = db.query(
+        func.year(Plan.period).label("year"),
+        func.month(Plan.period).label("month"),
+        func.sum(Plan.sum).label("plan_issuance")
+            ).filter(Plan.category_id == 3
+                ).group_by("year", "month")
+
+    table_plans_collection = db.query(
+        func.year(Plan.period).label("year"),
+        func.month(Plan.period).label("month"),
+        func.sum(Plan.sum).label("plan_collection")
+            ).filter(Plan.category_id == 4
+                ).group_by("year", "month")
+
+    table_payments = db.query(
+        func.year(Payment.payment_date).label("year"),
+        func.month(Payment.payment_date).label("month"),
+        func.count(Payment.id_payment).label("cnt_payments"),
+        func.sum(Payment.sum).label("sum_payments")
+            ).group_by("year", "month")
+
+    table_credits_subquery = table_credits.subquery()
+    table_plans_issuance_subquery = table_plans_issuance.subquery()
+    table_plans_collection_subquery = table_plans_collection.subquery()
+    table_payments_subquery = table_payments.subquery()
+
+    results = db.query(
+        table_credits_subquery.c.year.label("year"),
+        table_credits_subquery.c.month.label("month"),
+        table_credits_subquery.c.cnt_issuance.label("cnt_issuance"),
+        table_plans_issuance_subquery.c.plan_issuance.label("plan_issuance"),
+        table_credits_subquery.c.sum_issuance.label("sum_issuance"),
+        (table_credits_subquery.c.sum_issuance / table_plans_issuance_subquery.c.plan_issuance * 100).label("plan_execution_percent"),
+        table_payments_subquery.c.cnt_payments.label("cnt_payments"),
+        table_plans_collection_subquery.c.plan_collection.label("plan_collection"),
+        table_payments_subquery.c.sum_payments.label("sum_payments"),
+        (table_payments_subquery.c.sum_payments / table_plans_collection_subquery.c.plan_collection * 100).label("plan_collection_percent"),
+        (table_credits_subquery.c.sum_issuance / (func.sum(table_credits_subquery.c.sum_issuance)).over(
+            partition_by=table_credits_subquery.c.year) * 100).label("sum_credits_percent_per_year"),
+        (table_payments_subquery.c.sum_payments / (func.sum(table_payments_subquery.c.sum_payments)).over(
+            partition_by=table_credits_subquery.c.year) * 100).label("sum_payments_percent_per_year")
+    ).outerjoin(
+        table_plans_issuance_subquery,
+        and_(
+            table_credits_subquery.c.year == table_plans_issuance_subquery.c.year,
+            table_credits_subquery.c.month == table_plans_issuance_subquery.c.month
+        )
+    ).outerjoin(
+        table_plans_collection_subquery,
+        and_(
+            table_credits_subquery.c.year == table_plans_collection_subquery.c.year,
+            table_credits_subquery.c.month == table_plans_collection_subquery.c.month
+        )
+    ).outerjoin(
+        table_payments_subquery,
+        and_(
+            table_credits_subquery.c.year == table_payments_subquery.c.year,
+            table_credits_subquery.c.month == table_payments_subquery.c.month
+        )
+    ).filter_by(year=year).all()
+
     final_list = []
     for month in results:
         final_list.append({
             "year": month.year,
             "month": month.month,
-            "num_credits": month.num_credits,
-            "plan_sum": month.plan_sum,
-            "sum_credits": month.sum_credits,
+            "cnt_issuance": month.cnt_issuance,
+            "plan_issuance": month.plan_issuance,
+            "sum_issuance": month.sum_issuance,
             "plan_execution_percent": round(month.plan_execution_percent, 2),
-            "num_payments": month.num_payments,
-            "plan_collection_sum": month.plan_collection_sum,
+            "cnt_payments": month.cnt_payments,
+            "plan_collection": month.plan_collection,
             "sum_payments": round(month.sum_payments, 2),
-            "collection_execution_percent": round(month.collection_execution_percent),
-            "sum_credits_percent": round(month.sum_credits_percent, 2),
-            "sum_payments_percent": round(month.sum_payments_percent, 2)
+            "plan_collection_percent": round(month.plan_collection_percent, 2),
+            "sum_credits_percent_per_year": round(month.sum_credits_percent_per_year, 2),
+            "sum_payments_percent_per_year": round(month.sum_payments_percent_per_year, 2)
         })
 
     return {"year_performance": final_list}
