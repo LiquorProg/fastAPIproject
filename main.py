@@ -40,7 +40,7 @@ def get_user_credits(user_id: int):
         if credit.actual_return_date:
             # Закрытый кредит
             final_list.append({"issuance_date": credit.issuance_date.strftime("%Y-%m-%d"),
-                               "credit_status": True,
+                               "is_closed": True,
                                "actual_return_date": credit.actual_return_date.strftime("%Y-%m-%d"),
                                "body": credit.body,
                                "percent": credit.percent,
@@ -49,9 +49,9 @@ def get_user_credits(user_id: int):
         else:
             # Открытый кредит
             final_list.append({"issuance_date": credit.issuance_date.strftime("%Y-%m-%d"),
-                               "credit_status": False,
+                               "is_closed": False,
                                "return_date": credit.return_date.strftime("%Y-%m-%d"),
-                               "days_overdue": (difference := date.today() - credit.return_date).days,
+                               "days_overdue": (date.today() - credit.return_date).days,
                                "body": credit.body,
                                "percent": credit.percent,
                                "payments_by_body": round(credit.payments_by_body, 2),
@@ -78,14 +78,22 @@ def plans_insert(file: UploadFile = File(...)):
         except ValueError:
             raise HTTPException(status_code=400, detail="Невірний формат місяця плану. Вказуйте перше число місяця.")
 
+    id_dictionary = {"видача": 3, "збір": 4}
+
     # Проверка наличия плана в БД
     for index, row in df.iterrows():
         month = row['period']
-        category_id = row['category_id']
+        category_id = id_dictionary[row['category']]
         plan_exists = check_plan_exists(month, category_id)
         if plan_exists:
             raise HTTPException(status_code=400,
-                                detail=f"План на місяць {month.date()} з категорією {category_id} вже існує в базі даних.")
+                                detail=f"План на місяць {month.date()} з категорією '{row['category']}' вже існує в базі даних.")
+
+    # Преобразовать значения в столбце category в category_id
+    df['category_id'] = df['category'].map(id_dictionary)
+
+    # Удаляем столбец category, он для внесения данных в БД больше не нужен
+    df.drop('category', axis=1, inplace=True)
 
     # Вставка данных в таблицу Plans
     try:
@@ -97,11 +105,8 @@ def plans_insert(file: UploadFile = File(...)):
 
 
 @app.get("/plans_performance")
-def get_plans_performance(date: str):
+def get_plans_performance(target_date: date):
     try:
-        # Преобразовываем полученную дату из строки в объект datetime
-        target_date = datetime.strptime(date, '%Y-%m-%d')
-
         # Определяем месяц и год из даты
         month = target_date.month
         year = target_date.year
